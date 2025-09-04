@@ -1,0 +1,13 @@
+--- Core API Framework ---
+fastapi
+uvicorn
+gunicorn
+
+--- Machine Learning & Image Processing ---
+tensorflow # Handles both CPU and GPU, simpler for Render
+opencv-python
+Pillow
+numpy
+
+--- API Functionality ---
+python-multipart # Required by FastAPI for file uploads

@@ -1,25 +1,24 @@
-# app.py
-
-import streamlit as st
+# --- जरूरी लाइब्रेरीज इम्पोर्ट करें ---
+import uvicorn
+from fastapi import FastAPI, File, UploadFile, HTTPException, Path
 import tensorflow as tf
 import numpy as np
-import cv2
-import json
 from PIL import Image
-import io # इमेज को मेमोरी में प्रोसेस करने के लिए
+import io
+import json
+import cv2
 
-# --- 1. मॉडल को सिर्फ एक बार लोड करने के लिए कैशिंग का उपयोग करें ---
-@st.cache_resource
-def load_model_and_classes():
-    """
-    लोड करता है:
-    1. प्रशिक्षित Keras मॉडल।
-    2. क्लास के नामों की सूची (अंग्रेजी में)।
-    3. JSON फाइल से हिंदी में बीमारी की जानकारी।
-    """
-    model = tf.keras.models.load_model('cnn_model.keras')
+# --- FastAPI ऐप को शुरू करें ---
+app = FastAPI(
+    title="Plant Disease API with JSON Mapping",
+    description="यह API दो काम करती है: 1. इमेज से बीमारी का पता लगाना। 2. disease_key से बीमारी की जानकारी देना।"
+)
+
+# --- सर्वर शुरू होते ही मॉडल और डेटा लोड करें ---
+try:
+    MODEL = tf.keras.models.load_model('cnn_model.tflite')
     
-    class_labels = [
+    CLASS_LABELS = [
         'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
         'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 
         'Cherry_(including_sour)___healthy', 'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot', 
@@ -37,88 +36,65 @@ def load_model_and_classes():
     ]
     
     with open('responses.json', 'r', encoding='utf-8') as f:
-        disease_data = json.load(f)
+        DISEASE_DATA = json.load(f)
         
-    return model, class_labels, disease_data
+    print("Model, class labels, and disease data loaded successfully!")
 
-# --- 2. इमेज को प्रोसेस और प्रेडिक्ट करने के लिए फंक्शन ---
-def predict_image(model, image_bytes):
-    """
-    अपलोड की गई इमेज को प्रोसेस करता है और बीमारी का इंडेक्स बताता है।
-    """
-    # Bytes को इमेज में बदलें
+except Exception as e:
+    print(f"Error loading resources: {e}")
+    MODEL, CLASS_LABELS, DISEASE_DATA = None, [], None
+
+# --- इमेज को प्रोसेस और प्रेडिक्ट करने के लिए हेल्पर फंक्शन ---
+def process_and_predict(model, image_bytes):
     pil_image = Image.open(io.BytesIO(image_bytes))
     opencv_image = np.array(pil_image.convert('RGB'))
-    
-    # इमेज को प्री-प्रोसेस करें
-    H, W, C = 224, 224, 3
-    img = cv2.resize(opencv_image, (H, W))
-    img = img.astype('float32')
-    img = img / 255.0
-    img = img.reshape(1, H, W, C)
-
-    # प्रेडिक्शन करें
+    img = cv2.resize(opencv_image, (224, 224))
+    img = img.astype('float32') / 255.0
+    img = np.expand_dims(img, axis=0)
     prediction = np.argmax(model.predict(img), axis=-1)[0]
     return prediction
 
-# --- ऐप की शुरुआत में मॉडल और डेटा लोड करें ---
-model, class_labels, disease_data = load_model_and_classes()
+# --- एंडपॉइंट 1: इमेज अपलोड करके बीमारी का पता लगाएं ---
+@app.post("/recognize-disease-from-image")
+async def recognize_disease_from_image(file: UploadFile = File(...)):
+    """
+    यह एंडपॉइंट एक इमेज फाइल लेता है, मॉडल से प्रेडिक्शन करता है,
+    और JSON से जानकारी निकालकर पूरा रिजल्ट देता है।
+    """
+    if not MODEL or not DISEASE_DATA:
+        raise HTTPException(status_code=500, detail="Server resources not loaded.")
 
+    image_bytes = await file.read()
+    result_index = process_and_predict(MODEL, image_bytes)
+    
+    if result_index >= len(CLASS_LABELS):
+        raise HTTPException(status_code=500, detail="Prediction index out of bounds.")
+    
+    predicted_key = CLASS_LABELS[result_index]
+    
+    for disease in DISEASE_DATA['plant_diseases']:
+        if disease['disease_key'] == predicted_key:
+            return disease
+            
+    raise HTTPException(status_code=404, detail=f"Info for key '{predicted_key}' not found.")
 
-# --- Streamlit UI ---
-st.sidebar.title('Plant Disease Prediction System')
-app_mode = st.sidebar.selectbox('Select page', ['Home', 'Disease Recognition'])
+# --- एंडपॉइंट 2: JSON मैपिंग से बीमारी की जानकारी पाएं ---
+@app.get("/get-disease-info/{disease_key}")
+async def get_disease_info(disease_key: str = Path(..., description="JSON फाइल से बीमारी का की-वर्ड, जैसे 'Apple___Black_rot'")):
+    """
+    यह एंडपॉइंट एक `disease_key` लेता है और responses.json फाइल से
+    उसकी पूरी जानकारी निकालकर देता है।
+    """
+    if not DISEASE_DATA:
+        raise HTTPException(status_code=500, detail="Disease data not loaded.")
 
-if app_mode == 'Home':
-    st.markdown("<h1 style='text-align: center;'>Plant Disease Prediction System for Sustainable Agriculture</h1>", unsafe_allow_html=True)
-    try:
-        home_img = Image.open('Disease.png')
-        st.image(home_img, use_column_width=True)
-    except FileNotFoundError:
-        st.warning("Home page image ('Disease.png') not found.")
+    for disease in DISEASE_DATA['plant_diseases']:
+        if disease['disease_key'] == disease_key:
+            return disease # अगर की मिल जाती है, तो उसकी जानकारी भेजें
 
-elif app_mode == 'Disease Recognition':
-    st.header("Upload an Image for Disease Recognition")
-    test_image = st.file_uploader("Choose an Image:", type=['jpg', 'jpeg', 'png'])
+    # अगर लूप खत्म हो गया और की नहीं मिली
+    raise HTTPException(status_code=404, detail=f"'{disease_key}' नाम की कोई बीमारी नहीं मिली।")
 
-    if test_image is not None:
-        # --- 3. इमेज को फाइल में सेव करने की बजाय सीधे मेमोरी में प्रोसेस करें ---
-        image_bytes = test_image.getvalue()
-        
-        # इमेज दिखाएं
-        st.image(image_bytes, caption="Uploaded Image", use_column_width=True)
-        
-        if st.button("Predict"):
-            with st.spinner('Analyzing the image...'):
-                # 1. मॉडल से प्रेडिक्शन इंडेक्स प्राप्त करें
-                result_index = predict_image(model, image_bytes)
-                
-                # 2. इंडेक्स का उपयोग करके अंग्रेजी 'key' प्राप्त करें
-                predicted_key = class_labels[result_index]
-                
-                # 3. 'key' का उपयोग करके सही बीमारी की जानकारी खोजें
-                found_disease = None
-                for disease in disease_data['plant_diseases']:
-                    if disease['disease_key'] == predicted_key:
-                        found_disease = disease
-                        break
-                
-                # 4. हिंदी में परिणाम दिखाएं
-                if found_disease:
-                    st.success(f"**बीमारी का नाम:** {found_disease['disease_label']}")
-                    
-                    # 'healthy' केस को अलग से हैंडल करें
-                    if 'healthy' in predicted_key:
-                        st.write(found_disease['treatment_advice']['रोकथाम'])
-                    else:
-                        st.subheader("गंभीरता के लक्षण:")
-                        st.write(f"**कम:** {found_disease['severity']['कम']}")
-                        st.write(f"**मध्यम:** {found_disease['severity']['मध्यम']}")
-                        st.write(f"**गंभीर:** {found_disease['severity']['गंभीर']}")
-                        
-                        st.subheader("उपचार और सलाह:")
-                        st.write(f"**रोकथाम:** {found_disease['treatment_advice']['रोकथाम']}")
-                        st.write(f"**शुरुआती इलाज:** {found_disease['treatment_advice']['शुरुआती इलाज']}")
-                        st.write(f"**गंभीर इलाज:** {found_disease['treatment_advice']['गंभीर इलाज']}")
-                else:
-                    st.error("बीमारी की जानकारी नहीं मिली।")
+# --- सर्वर को चलाने के लिए कोड ---
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

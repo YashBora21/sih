@@ -16,7 +16,7 @@ app = FastAPI(
 
 # --- सर्वर शुरू होते ही मॉडल और डेटा लोड करें ---
 try:
-    MODEL = tf.keras.models.load_model('cnn_model.tflite')
+    MODEL =  tf.lite.Interpreter(model_path="cnn_model.tflite")
     
     CLASS_LABELS = [
         'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
@@ -51,8 +51,27 @@ def process_and_predict(model, image_bytes):
     img = cv2.resize(opencv_image, (224, 224))
     img = img.astype('float32') / 255.0
     img = np.expand_dims(img, axis=0)
-    prediction = np.argmax(model.predict(img), axis=-1)[0]
+
+    # Allocate tensors once
+    model.allocate_tensors()
+
+    # Get input/output details
+    input_details = model.get_input_details()
+    output_details = model.get_output_details()
+
+    # Set input
+    model.set_tensor(input_details[0]['index'], img)
+
+    # Run inference
+    model.invoke()
+
+    # Get output
+    output_data = model.get_tensor(output_details[0]['index'])
+
+    # Pick predicted class
+    prediction = np.argmax(output_data, axis=-1)[0]
     return prediction
+
 
 # --- एंडपॉइंट 1: इमेज अपलोड करके बीमारी का पता लगाएं ---
 @app.post("/recognize-disease-from-image")
